@@ -1,25 +1,36 @@
-from django.shortcuts import get_object_or_404
-from rest_framework import mixins
-from rest_framework import viewsets, permissions, filters
+from rest_framework import permissions, viewsets, filters
 from rest_framework.pagination import LimitOffsetPagination
-from .permissions import IsAuthorOrReadOnly
-from posts.models import Comment, Group, Post
-from .serializers import FollowSerializer
-from .serializers import CommentSerializer, GroupSerializer, PostSerializer
+from posts.models import Post, Comment, Group, Follow
+from .serializers import PostSerializer, CommentSerializer
+from .serializers import GroupSerializer, FollowSerializer
+from rest_framework.response import Response
 
 
-class GroupViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = Group.objects.all()
-    serializer_class = GroupSerializer
-    permission_classes = [permissions.AllowAny]
-    pagination_class = None
+class ReadOnlyOrOwner_(permissions.BasePermission):
+
+    def has_permission(self, request, view):
+        return (
+            request.method in permissions.SAFE_METHODS
+            or request.user.is_authenticated
+        )
+
+    def has_object_permission(self, request, view, obj):
+        x = obj.author == request.user
+        y = request.method in permissions.SAFE_METHODS
+        return x or y
+
+
+class ReadOnly(permissions.BasePermission):
+
+    def has_permission(self, request, view):
+        a = request.method
+        return a in permissions.SAFE_METHODS or a == "POST"
 
 
 class PostViewSet(viewsets.ModelViewSet):
     queryset = Post.objects.all()
     serializer_class = PostSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly,
-                          IsAuthorOrReadOnly]
+    permission_classes = (ReadOnlyOrOwner_,)
     pagination_class = LimitOffsetPagination
 
     def perform_create(self, serializer):
@@ -27,32 +38,56 @@ class PostViewSet(viewsets.ModelViewSet):
 
 
 class CommentViewSet(viewsets.ModelViewSet):
+    queryset = Comment.objects.all()
     serializer_class = CommentSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly,
-                          IsAuthorOrReadOnly]
-    pagination_class = None
+    permission_classes = (ReadOnlyOrOwner_,)
 
     def get_queryset(self):
-        post_id = self.kwargs.get('post_id')
-        return Comment.objects.filter(post_id=post_id)
+        return Comment.objects.filter(post_id=self.kwargs['post_id'])
 
     def perform_create(self, serializer):
-        post = get_object_or_404(Post, pk=self.kwargs.get('post_id'))
-        serializer.save(author=self.request.user, post=post)
+        serializer.save(author=self.request.user,
+                        post=Post.objects.get(id=self.kwargs['post_id']))
 
 
-class FollowViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
-                    viewsets.GenericViewSet):
-    """Список подписок."""
+class GroupViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Group.objects.all()
+    serializer_class = GroupSerializer
+    permission_classes = (ReadOnly,)
 
+
+class FollowViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Follow.objects.all()
     serializer_class = FollowSerializer
-    permission_classes = (permissions.IsAuthenticated,)
     filter_backends = [filters.SearchFilter]
     search_fields = ['following__username']
-    pagination_class = None
 
     def get_queryset(self):
-        return self.request.user.follower.all()
+        return Follow.objects.filter(user=self.request.user)
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    def create(self, request):
+        serializer = FollowSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            return Response({"error": "Неверные данные"}, status=400)
+
+        user = request.user
+        target = serializer.validated_data['following']
+
+        if target.username == user.username:
+            return Response(
+                {"error": "Нельзя подписаться на самого себя."},
+                status=400
+            )
+
+        if Follow.objects.filter(user=user, following=target).exists():
+            return Response(
+                {"error": "Подписка уже существует"},
+                status=400
+            )
+
+        serializer.save(user=user, following=target)
+        return Response(serializer.data, status=201)
